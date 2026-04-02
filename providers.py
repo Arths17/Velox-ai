@@ -19,13 +19,15 @@ Model string formats:
   "ollama/qwen2.5-coder"     explicit provider prefix
   "custom/my-model"          uses CUSTOM_BASE_URL from config
 """
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 import json
-from typing import Generator
+import re
+from typing import Any, Generator
 
 # ── Provider registry ──────────────────────────────────────────────────────
 
-PROVIDERS: dict[str, dict] = {
+PROVIDERS: dict[str, dict[str, Any]] = {
     "anthropic": {
         "type":       "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
@@ -52,6 +54,17 @@ PROVIDERS: dict[str, dict] = {
             "gemini-2.5-pro-preview-03-25",
             "gemini-2.0-flash", "gemini-2.0-flash-lite",
             "gemini-1.5-pro", "gemini-1.5-flash",
+        ],
+    },
+    "openrouter": {
+        "type":       "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url":   "https://openrouter.ai/api/v1",
+        "models": [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4.1-mini",
+            "anthropic/claude-3.7-sonnet",
+            "google/gemini-2.0-flash-001",
         ],
     },
     "kimi": {
@@ -136,6 +149,16 @@ COSTS = {
     "glm-4-plus":               (0.7,   0.7),
 }
 
+ROUTER_FAST_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
+}
+
+ROUTER_REASONING_MODELS = {
+    "openai": "o1",
+    "anthropic": "claude-opus-4-6",
+}
+
 # Auto-detection: prefix → provider name
 _PREFIXES = [
     ("claude-",       "anthropic"),
@@ -149,6 +172,7 @@ _PREFIXES = [
     ("qwq-",          "qwen"),
     ("glm-",          "zhipu"),
     ("deepseek-",     "deepseek"),
+    ("openrouter/",   "openrouter"),
     ("llama",         "ollama"),
     ("mistral",       "ollama"),
     ("phi",           "ollama"),
@@ -172,7 +196,7 @@ def bare_model(model: str) -> str:
     return model.split("/", 1)[1] if "/" in model else model
 
 
-def get_api_key(provider_name: str, config: dict) -> str:
+def get_api_key(provider_name: str, config: dict[str, Any]) -> str:
     prov = PROVIDERS.get(provider_name, {})
     # 1. Check config dict (e.g. config["kimi_api_key"])
     cfg_key = config.get(f"{provider_name}_api_key", "")
@@ -182,7 +206,14 @@ def get_api_key(provider_name: str, config: dict) -> str:
     env_var = prov.get("api_key_env")
     if env_var:
         import os
-        return os.environ.get(env_var, "")
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+        if provider_name == "gemini":
+            return os.environ.get("GOOGLE_API_KEY", "")
+        if provider_name == "openrouter":
+            return os.environ.get("OR_API_KEY", "")
+        return ""
     # 3. Hardcoded (for local providers)
     return prov.get("api_key", "")
 
@@ -192,9 +223,113 @@ def calc_cost(model: str, in_tok: int, out_tok: int) -> float:
     return (in_tok * ic + out_tok * oc) / 1_000_000
 
 
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            else:
+                text = getattr(block, "text", "")
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return _message_text(message)
+    return ""
+
+
+def _complexity_score(messages: list[dict[str, Any]], system: str) -> float:
+    text = f"{system}\n{_latest_user_text(messages)}".lower()
+    score = 0.0
+    length = len(text)
+    score += min(length / 900.0, 3.0)
+
+    keyword_weights = {
+        "architect": 1.5,
+        "architecture": 1.5,
+        "refactor": 1.5,
+        "migration": 1.5,
+        "rag": 1.0,
+        "vector": 1.0,
+        "sandbox": 1.0,
+        "security": 1.2,
+        "performance": 1.0,
+        "optimize": 1.0,
+        "multi-file": 1.2,
+        "cross-file": 1.2,
+        "whole repo": 1.2,
+        "bug": 0.8,
+        "traceback": 0.8,
+        "test": 0.7,
+        "review": 0.7,
+        "dependency": 1.0,
+        "install": 0.7,
+        "error": 0.8,
+    }
+    for keyword, weight in keyword_weights.items():
+        if keyword in text:
+            score += weight
+
+    if re.search(r"\b\d+\s+files?\b", text):
+        score += 1.0
+    if len(messages) > 12:
+        score += 0.8
+    if text.count("\n") > 20:
+        score += 0.5
+    return score
+
+
+def _available_model(model: str, config: dict[str, Any]) -> bool:
+    provider = detect_provider(model)
+    if PROVIDERS.get(provider, {}).get("type") == "openai" and provider not in ("ollama", "lmstudio", "custom"):
+        return bool(get_api_key(provider, config))
+    if provider == "anthropic":
+        return bool(get_api_key(provider, config))
+    return True
+
+
+def resolve_router_model(model: str, messages: list[dict[str, Any]], system: str, config: dict[str, Any]) -> tuple[str, str]:
+    requested = model
+    if requested not in {"router", "auto", "auto-router"} and not config.get("router_enabled", False):
+        return requested, "router disabled"
+
+    complexity = _complexity_score(messages, system)
+    simple_model = config.get("router_fast_model") or ROUTER_FAST_MODELS.get(
+        detect_provider(config.get("model", requested)),
+        "gpt-4o-mini",
+    )
+    reasoning_model = config.get("router_reasoning_model") or ROUTER_REASONING_MODELS.get(
+        detect_provider(config.get("model", requested)),
+        "claude-opus-4-6",
+    )
+    threshold = float(config.get("router_threshold", 3.0))
+    chosen = reasoning_model if complexity >= threshold else simple_model
+
+    if not _available_model(chosen, config):
+        fallback = requested if requested not in {"router", "auto", "auto-router"} else config.get("model", chosen)
+        if _available_model(fallback, config):
+            return fallback, f"router fallback → {fallback}"
+        other = simple_model if chosen == reasoning_model else reasoning_model
+        if _available_model(other, config):
+            return other, f"router fallback → {other}"
+        return chosen, f"router unavailable keys; using {chosen}"
+
+    return chosen, f"router score={complexity:.1f} threshold={threshold:.1f}"
+
+
 # ── Tool schema conversion ─────────────────────────────────────────────────
 
-def tools_to_openai(tool_schemas: list) -> list:
+def tools_to_openai(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic-style tool schemas to OpenAI function-calling format."""
     return [
         {
@@ -218,7 +353,7 @@ def tools_to_openai(tool_schemas: list) -> list:
 #   ]}
 #   {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
 
-def messages_to_anthropic(messages: list) -> list:
+def messages_to_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert neutral messages → Anthropic API format."""
     result = []
     i = 0
@@ -264,7 +399,7 @@ def messages_to_anthropic(messages: list) -> list:
     return result
 
 
-def messages_to_openai(messages: list) -> list:
+def messages_to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert neutral messages → OpenAI API format."""
     result = []
     for m in messages:
@@ -303,14 +438,14 @@ def messages_to_openai(messages: list) -> list:
 # ── Streaming adapters ─────────────────────────────────────────────────────
 
 class TextChunk:
-    def __init__(self, text): self.text = text
+    def __init__(self, text: str): self.text = text
 
 class ThinkingChunk:
-    def __init__(self, text): self.text = text
+    def __init__(self, text: str): self.text = text
 
 class AssistantTurn:
     """Completed assistant turn with text + tool_calls."""
-    def __init__(self, text, tool_calls, in_tokens, out_tokens):
+    def __init__(self, text: str, tool_calls: list[dict[str, Any]], in_tokens: int, out_tokens: int):
         self.text        = text
         self.tool_calls  = tool_calls   # list of {id, name, input}
         self.in_tokens   = in_tokens
@@ -321,10 +456,10 @@ def stream_anthropic(
     api_key: str,
     model: str,
     system: str,
-    messages: list,
-    tool_schemas: list,
-    config: dict,
-) -> Generator:
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> Generator[Any, None, None]:
     """Stream from Anthropic API. Yields TextChunk/ThinkingChunk, then AssistantTurn."""
     import anthropic as _ant
     client = _ant.Anthropic(api_key=api_key)
@@ -342,8 +477,8 @@ def stream_anthropic(
             "budget_tokens": config.get("thinking_budget", 10000),
         }
 
-    tool_calls = []
-    text       = ""
+    tool_calls: list[dict[str, Any]] = []
+    text = ""
 
     with client.messages.stream(**kwargs) as stream:
         for event in stream:
@@ -378,10 +513,10 @@ def stream_openai_compat(
     base_url: str,
     model: str,
     system: str,
-    messages: list,
-    tool_schemas: list,
-    config: dict,
-) -> Generator:
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> Generator[Any, None, None]:
     """Stream from any OpenAI-compatible API. Yields TextChunk, then AssistantTurn."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
@@ -401,9 +536,10 @@ def stream_openai_compat(
     if config.get("max_tokens"):
         kwargs["max_tokens"] = config["max_tokens"]
 
-    text          = ""
-    tool_buf: dict = {}   # index → {id, name, args_str}
-    in_tok = out_tok = 0
+    text = ""
+    tool_buf: dict[int, dict[str, str]] = {}   # index → {id, name, args_str}
+    in_tok = 0
+    out_tok = 0
 
     stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
@@ -454,15 +590,19 @@ def stream_openai_compat(
 def stream(
     model: str,
     system: str,
-    messages: list,
-    tool_schemas: list,
-    config: dict,
-) -> Generator:
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> Generator[Any, None, None]:
     """
     Unified streaming entry point.
     Auto-detects provider from model string.
     Yields: TextChunk | ThinkingChunk | AssistantTurn
     """
+    model, route_reason = resolve_router_model(model, messages, system, config)
+    config["_active_model"] = model
+    config["_model_route_reason"] = route_reason
+
     provider_name = detect_provider(model)
     model_name    = bare_model(model)
     prov          = PROVIDERS.get(provider_name, PROVIDERS["openai"])

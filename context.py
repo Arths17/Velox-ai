@@ -1,8 +1,16 @@
 """System context: CLAUDE.md, git info, cwd injection."""
-import os
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from typing import Any
+
+_CLAUDE_MD_CACHE: dict[str, Any] = {
+    "cwd": "",
+    "global_mtime": 0.0,
+    "project_mtime": 0.0,
+    "content": "",
+}
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are Nano Claude Code, Created by SAIL Lab (Safe AI and Robot Learning Lab), an AI coding assistant running in the terminal.
@@ -63,6 +71,7 @@ def get_claude_md() -> str:
 
     # Global CLAUDE.md
     global_md = Path.home() / ".claude" / "CLAUDE.md"
+    global_mtime = global_md.stat().st_mtime if global_md.exists() else 0.0
     if global_md.exists():
         try:
             content_parts.append(f"[Global CLAUDE.md]\n{global_md.read_text()}")
@@ -71,9 +80,11 @@ def get_claude_md() -> str:
 
     # Project CLAUDE.md (walk up from cwd)
     p = Path.cwd()
+    project_file = None
     for _ in range(10):
         candidate = p / "CLAUDE.md"
         if candidate.exists():
+            project_file = candidate
             try:
                 content_parts.append(f"[Project CLAUDE.md: {candidate}]\n{candidate.read_text()}")
             except Exception:
@@ -84,9 +95,26 @@ def get_claude_md() -> str:
             break
         p = parent
 
+    project_mtime = project_file.stat().st_mtime if project_file and project_file.exists() else 0.0
+    cwd = str(Path.cwd())
+
+    if (
+        _CLAUDE_MD_CACHE["cwd"] == cwd
+        and _CLAUDE_MD_CACHE["global_mtime"] == global_mtime
+        and _CLAUDE_MD_CACHE["project_mtime"] == project_mtime
+    ):
+        return str(_CLAUDE_MD_CACHE["content"])
+
     if not content_parts:
-        return ""
-    return "\n# Memory / CLAUDE.md\n" + "\n\n".join(content_parts) + "\n"
+        content = ""
+    else:
+        content = "\n# Memory / CLAUDE.md\n" + "\n\n".join(content_parts) + "\n"
+
+    _CLAUDE_MD_CACHE["cwd"] = cwd
+    _CLAUDE_MD_CACHE["global_mtime"] = global_mtime
+    _CLAUDE_MD_CACHE["project_mtime"] = project_mtime
+    _CLAUDE_MD_CACHE["content"] = content
+    return content
 
 
 def build_system_prompt() -> str:

@@ -1,14 +1,14 @@
 """Tool definitions and implementations for nano claude."""
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportAssignmentType=false, reportArgumentType=false
 import os
 import re
-import glob as _glob
 import subprocess
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # ── Tool JSON schemas (sent to Claude API) ─────────────────────────────────
 
-TOOL_SCHEMAS = [
+TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "Read",
         "description": (
@@ -144,7 +144,7 @@ def _is_safe_bash(cmd: str) -> bool:
 
 # ── Tool implementations ───────────────────────────────────────────────────
 
-def _read(file_path: str, limit: int = None, offset: int = None) -> str:
+def _read(file_path: str, limit: Optional[int] = None, offset: Optional[int] = None) -> str:
     p = Path(file_path)
     if not p.exists():
         return f"Error: file not found: {file_path}"
@@ -208,7 +208,7 @@ def _bash(command: str, timeout: int = 30) -> str:
         return f"Error: {e}"
 
 
-def _glob(pattern: str, path: str = None) -> str:
+def _glob(pattern: str, path: Optional[str] = None) -> str:
     base = Path(path) if path else Path.cwd()
     try:
         matches = sorted(base.glob(pattern))
@@ -227,7 +227,7 @@ def _has_rg() -> bool:
         return False
 
 
-def _grep(pattern: str, path: str = None, glob: str = None,
+def _grep(pattern: str, path: Optional[str] = None, glob: Optional[str] = None,
           output_mode: str = "files_with_matches",
           case_insensitive: bool = False, context: int = 0) -> str:
     use_rg = _has_rg()
@@ -254,7 +254,7 @@ def _grep(pattern: str, path: str = None, glob: str = None,
         return f"Error: {e}"
 
 
-def _webfetch(url: str, prompt: str = None) -> str:
+def _webfetch(url: str, prompt: Optional[str] = None) -> str:
     try:
         import httpx
         r = httpx.get(url, headers={"User-Agent": "NanoClaude/1.0"},
@@ -303,7 +303,7 @@ def _websearch(query: str) -> str:
 
 def execute_tool(
     name: str,
-    inputs: dict,
+    inputs: dict[str, Any],
     permission_mode: str = "auto",
     ask_permission: Optional[Callable[[str], bool]] = None,
 ) -> str:

@@ -3,8 +3,14 @@
 Generate animated GIF demo of nano claude code using PIL.
 Simulates a realistic terminal session with tool calls.
 """
+from __future__ import annotations
+
 from PIL import Image, ImageDraw, ImageFont
-import os, textwrap
+from collections.abc import Sequence
+from typing import TypeAlias
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportMissingParameterType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false
+
+import os
 
 # ── Catppuccin Mocha palette ─────────────────────────────────────────────
 BG      = (30,  30,  46)   # base
@@ -28,7 +34,10 @@ PAD_X      = 18
 PAD_Y      = 16
 
 
-def make_font(size=FONT_SIZE, bold=False):
+def make_font(
+    size: int = FONT_SIZE,
+    bold: bool = False,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     path = FONT_BOLD if bold else FONT_PATH
     try:
         return ImageFont.truetype(path, size)
@@ -36,20 +45,33 @@ def make_font(size=FONT_SIZE, bold=False):
         return ImageFont.load_default()
 
 
-FONT      = make_font()
-FONT_B    = make_font(bold=True)
-FONT_SM   = make_font(FONT_SIZE - 1)
+FONT: ImageFont.ImageFont = make_font()
+FONT_B: ImageFont.ImageFont = make_font(bold=True)
+FONT_SM: ImageFont.ImageFont = make_font(FONT_SIZE - 1)
 
 
 # ── Segment: (text, color, bold?) ────────────────────────────────────────
-Seg = tuple   # (str, rgb_tuple, bool)
+Seg: TypeAlias = tuple[str, tuple[int, int, int], bool]
+Line: TypeAlias = list[Seg]
+FrameLine: TypeAlias = Line | Seg | None
+FrameLines: TypeAlias = list[FrameLine]
+Scene: TypeAlias = tuple[FrameLines, int]
 
 
-def seg(t, c=TEXT, b=False): return (t, c, b)
-def segs(*args): return list(args)
+def seg(t: str, c: tuple[int, int, int] = TEXT, b: bool = False) -> Seg:
+    return (t, c, b)
 
 
-def render_line(draw, y, segments, x_start=PAD_X):
+def segs(*args: Seg) -> Line:
+    return list(args)
+
+
+def render_line(
+    draw: ImageDraw.ImageDraw,
+    y: int,
+    segments: Sequence[Seg],
+    x_start: int = PAD_X,
+) -> int:
     x = x_start
     for text, color, bold in segments:
         font = FONT_B if bold else FONT
@@ -58,12 +80,12 @@ def render_line(draw, y, segments, x_start=PAD_X):
     return y + LINE_H
 
 
-def blank_frame():
+def blank_frame() -> Image.Image:
     img = Image.new("RGB", (W, H), BG)
     return img
 
 
-def draw_frame(lines_segments):
+def draw_frame(lines_segments: Sequence[FrameLine]) -> Image.Image:
     """
     lines_segments: list of either
       - list[Seg]  → rendered as a line
@@ -71,7 +93,7 @@ def draw_frame(lines_segments):
     Returns PIL Image.
     """
     img = blank_frame()
-    d   = ImageDraw.Draw(img)
+    d: ImageDraw.ImageDraw = ImageDraw.Draw(img)
     y = PAD_Y
     for item in lines_segments:
         if item is None:
@@ -85,7 +107,7 @@ def draw_frame(lines_segments):
 
 # ── Pre-defined screen content blocks ───────────────────────────────────
 
-BANNER = [
+BANNER: list[FrameLine] = [
     [seg("╭─ Nano Claude Code ──────────────────────────────────────────╮", SUBTEXT)],
     [seg("│  ", SUBTEXT), seg("Model: ", SUBTEXT), seg("claude-opus-4-6", CYAN, True)],
     [seg("│  ", SUBTEXT), seg("Permissions: ", SUBTEXT), seg("auto", YELLOW)],
@@ -94,7 +116,7 @@ BANNER = [
     None,
 ]
 
-def prompt_line(text="", cursor=False):
+def prompt_line(text: str = "", cursor: bool = False) -> Line:
     cur = "█" if cursor else ""
     return [
         seg("[nano_claude_code] ", SUBTEXT),
@@ -102,17 +124,17 @@ def prompt_line(text="", cursor=False):
         seg(text + cur, TEXT),
     ]
 
-def claude_header():
+def claude_header() -> Line:
     return [
         seg("╭─ Claude ", SUBTEXT),
         seg("●", GREEN),
         seg(" ─────────────────────────────────────────────", SUBTEXT),
     ]
 
-def claude_sep():
+def claude_sep() -> Line:
     return [seg("╰──────────────────────────────────────────────────────────", SUBTEXT)]
 
-def tool_line(icon, name, arg, color=CYAN):
+def tool_line(icon: str, name: str, arg: str, color: tuple[int, int, int] = CYAN) -> Line:
     return [
         seg(f"  {icon}  ", SUBTEXT),
         seg(name, color),
@@ -121,25 +143,26 @@ def tool_line(icon, name, arg, color=CYAN):
         seg(")", SUBTEXT),
     ]
 
-def tool_ok(msg):
+def tool_ok(msg: str) -> Line:
     return [seg(f"  ✓ ", GREEN), seg(msg, SUBTEXT)]
 
-def tool_err(msg):
+def tool_err(msg: str) -> Line:
     return [seg(f"  ✗ ", RED), seg(msg, SUBTEXT)]
 
-def text_line(t, indent=2):
+def text_line(t: str, indent: int = 2) -> Line:
     return [seg(" " * indent + t, TEXT)]
 
-def dim_line(t, indent=4):
+def dim_line(t: str, indent: int = 4) -> Line:
     return [seg(" " * indent + t, SUBTEXT)]
 
 
 # ── Scene builder ─────────────────────────────────────────────────────────
 
-def build_scenes():
+def build_scenes() -> list[Scene]:
     """Return list of (frame_content, duration_ms)."""
-    scenes = []
-    def add(lines, ms=120):
+    scenes: list[Scene] = []
+
+    def add(lines: FrameLines, ms: int = 120) -> None:
         scenes.append((lines, ms))
 
     # ── Scene 0: Empty terminal with banner ──────────────────────────────
@@ -204,7 +227,7 @@ def build_scenes():
         None,
         [seg("│ ", SUBTEXT)],
     ]
-    streamed = []
+    streamed: list[Line] = []
     for i, rline in enumerate(response_lines):
         streamed.append(text_line(rline, 2))
         content = base + tool_section + streamed
@@ -261,7 +284,7 @@ def build_scenes():
         None,
         [seg("│ ", SUBTEXT)],
     ]
-    streamed2 = []
+    streamed2: list[Line] = []
     for rline in resp2:
         streamed2.append(text_line(rline, 2))
         add(base2 + tool2 + streamed2, 90)
@@ -291,13 +314,13 @@ def build_scenes():
 
 # ── Render ────────────────────────────────────────────────────────────────
 
-def _build_explicit_palette():
+def _build_explicit_palette() -> list[int]:
     """
     Build a 256-entry palette from our exact theme colors.
     Returns flat list of 768 ints (R,G,B, R,G,B, ...) suitable for putpalette().
     """
     # All distinct colors used in the renderer
-    theme = [
+    theme: list[tuple[int, int, int]] = [
         BG, SURFACE, TEXT, SUBTEXT,
         CYAN, GREEN, YELLOW, RED, MAUVE, BLUE, PEACH,
         (255, 255, 255), (0, 0, 0),
@@ -306,7 +329,7 @@ def _build_explicit_palette():
         (90, 95, 120),  # dim text variant
         (160, 166, 200),
     ]
-    flat = []
+    flat: list[int] = []
     for c in theme:
         flat.extend(c)
     # Pad to 256 entries with black
@@ -315,7 +338,7 @@ def _build_explicit_palette():
     return flat
 
 
-def render_gif(output_path="demo.gif"):
+def render_gif(output_path: str = "demo.gif") -> None:
     print("Building scenes...")
     scenes = build_scenes()
     print(f"  {len(scenes)} scenes")
@@ -327,8 +350,8 @@ def render_gif(output_path="demo.gif"):
     pal_ref.putpalette(palette_data)
 
     print("  Rendering frames...")
-    rgb_frames = []
-    durations  = []
+    rgb_frames: list[Image.Image] = []
+    durations: list[int] = []
     for i, (lines, ms) in enumerate(scenes):
         img = draw_frame(lines)
         rgb_frames.append(img)
@@ -338,7 +361,7 @@ def render_gif(output_path="demo.gif"):
 
     # Quantize all frames to the same explicit palette (no dither → exact snap)
     print("  Quantizing to global palette...")
-    p_frames = [f.quantize(palette=pal_ref, dither=0) for f in rgb_frames]
+    p_frames: list[Image.Image] = [f.quantize(palette=pal_ref, dither=Image.Dither.NONE) for f in rgb_frames]
 
     print(f"Saving GIF → {output_path}  ({len(p_frames)} frames)...")
     p_frames[0].save(
@@ -355,9 +378,9 @@ def render_gif(output_path="demo.gif"):
 
 # ── Static screenshot ─────────────────────────────────────────────────────
 
-def render_screenshot(output_path="screenshot.png"):
+def render_screenshot(output_path: str = "screenshot.png") -> None:
     """Single high-quality screenshot showing a complete session."""
-    lines = (
+    lines: FrameLines = (
         BANNER +
         [prompt_line("List Python files and their line counts")] +
         [None, claude_header()] +
@@ -404,7 +427,6 @@ def render_screenshot(output_path="screenshot.png"):
 
 
 if __name__ == "__main__":
-    import sys
     out_dir = os.path.dirname(os.path.abspath(__file__))
 
     gif_path = os.path.join(out_dir, "demo.gif")

@@ -20,6 +20,7 @@ Slash commands in REPL:
   /save [f]   Save session to file
   /load [f]   Load session from file
   /history    Print conversation history
+    /dream      Show or trigger Dream Mode consolidation
   /context    Show context window usage
   /cost       Show API cost this session
   /verbose    Toggle verbose mode
@@ -28,6 +29,7 @@ Slash commands in REPL:
   /cwd [path] Show or change working directory
   /exit /quit Exit
 """
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportMissingParameterType=false, reportUnusedImport=false, reportConstantRedefinition=false, reportOptionalMemberAccess=false, reportPossiblyUnboundVariable=false, reportArgumentType=false
 from __future__ import annotations
 
 import os
@@ -36,18 +38,13 @@ import json
 import readline
 import atexit
 import argparse
-import textwrap
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 # ── Optional rich for markdown rendering ──────────────────────────────────
 try:
     from rich.console import Console
     from rich.markdown import Markdown
-    from rich.syntax import Syntax
-    from rich.panel import Panel
-    from rich import print as rprint
     _RICH = True
     console = Console()
 except ImportError:
@@ -105,7 +102,7 @@ def flush_response():
             return
     print()  # ensure newline after stream
 
-def print_tool_start(name: str, inputs: dict, verbose: bool):
+def print_tool_start(name: str, inputs: dict[str, Any], verbose: bool):
     """Show tool invocation."""
     desc = _tool_desc(name, inputs)
     print(clr(f"\n  ⚙  {desc}", "dim", "cyan"), flush=True)
@@ -124,7 +121,7 @@ def print_tool_end(name: str, result: str, verbose: bool):
         preview = result[:500] + ("…" if len(result) > 500 else "")
         print(clr(f"     {preview.replace(chr(10), chr(10)+'     ')}", "dim"))
 
-def _tool_desc(name: str, inputs: dict) -> str:
+def _tool_desc(name: str, inputs: dict[str, Any]) -> str:
     if name == "Read":   return f"Read({inputs.get('file_path','')})"
     if name == "Write":  return f"Write({inputs.get('file_path','')})"
     if name == "Edit":   return f"Edit({inputs.get('file_path','')})"
@@ -138,7 +135,7 @@ def _tool_desc(name: str, inputs: dict) -> str:
 
 # ── Permission prompt ──────────────────────────────────────────────────────
 
-def ask_permission_interactive(desc: str, config: dict) -> bool:
+def ask_permission_interactive(desc: str, config: dict[str, Any]) -> bool:
     try:
         print()
         ans = input(clr(f"  Allow: {desc}  [y/N/a(ccept-all)] ", "yellow")).strip().lower()
@@ -212,28 +209,28 @@ def cmd_config(args: str, _state, config) -> bool:
     return True
 
 def cmd_save(args: str, state, _config) -> bool:
-    from config import SESSIONS_DIR
-    fname = args.strip() or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    path = Path(fname) if "/" in fname else SESSIONS_DIR / fname
-    data = {
-        "messages": [
-            m if not isinstance(m.get("content"), list) else
-            {**m, "content": [
-                b if isinstance(b, dict) else b.model_dump()
-                for b in m["content"]
-            ]}
-            for m in state.messages
-        ],
-        "turn_count": state.turn_count,
-        "total_input_tokens": state.total_input_tokens,
-        "total_output_tokens": state.total_output_tokens,
-    }
-    path.write_text(json.dumps(data, indent=2, default=str))
+    from session_memory import persist_session
+    if args.strip():
+        # Keep compatibility with explicit path export.
+        fname = args.strip()
+        path = Path(fname)
+        data = {
+            "session_id": state.session_id,
+            "messages": state.messages,
+            "turn_count": state.turn_count,
+            "total_input_tokens": state.total_input_tokens,
+            "total_output_tokens": state.total_output_tokens,
+        }
+        path.write_text(json.dumps(data, indent=2, default=str))
+        ok(f"Session exported to {path}")
+        return True
+    path = persist_session(state, reason="manual_save")
     ok(f"Session saved to {path}")
     return True
 
 def cmd_load(args: str, state, _config) -> bool:
     from config import SESSIONS_DIR
+    from session_memory import hydrate_state
     if not args.strip():
         # List available sessions
         sessions = sorted(SESSIONS_DIR.glob("*.json"))
@@ -250,11 +247,29 @@ def cmd_load(args: str, state, _config) -> bool:
         err(f"File not found: {path}")
         return True
     data = json.loads(path.read_text())
-    state.messages = data.get("messages", [])
-    state.turn_count = data.get("turn_count", 0)
-    state.total_input_tokens = data.get("total_input_tokens", 0)
-    state.total_output_tokens = data.get("total_output_tokens", 0)
+    hydrate_state(state, data)
     ok(f"Session loaded from {path} ({len(state.messages)} messages)")
+    return True
+
+def cmd_dream(args: str, state, config) -> bool:
+    from session_memory import maybe_schedule_dream
+    arg = args.strip().lower()
+    if arg in ("on", "off"):
+        config["dream_mode"] = arg == "on"
+        from config import save_config
+        save_config(config)
+        ok(f"Dream mode: {'ON' if config['dream_mode'] else 'OFF'}")
+        return True
+
+    status = maybe_schedule_dream(state, config)
+    if status == "scheduled":
+        ok("Dream consolidation scheduled in background.")
+    elif status == "running":
+        info("Dream consolidation already running.")
+    else:
+        info(
+            "Dream idle. Usage: /dream on | /dream off | /dream to trigger now when eligible."
+        )
     return True
 
 def cmd_history(_args: str, state, _config) -> bool:
@@ -359,6 +374,7 @@ COMMANDS = {
     "save":        cmd_save,
     "load":        cmd_load,
     "history":     cmd_history,
+    "dream":       cmd_dream,
     "context":     cmd_context,
     "cost":        cmd_cost,
     "verbose":     cmd_verbose,
@@ -392,10 +408,18 @@ def handle_slash(line: str, state, config) -> bool:
 def setup_readline(history_file: Path):
     try:
         readline.read_history_file(str(history_file))
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         pass
     readline.set_history_length(1000)
-    atexit.register(readline.write_history_file, str(history_file))
+
+    def _write_history_safe() -> None:
+        try:
+            readline.write_history_file(str(history_file))
+        except OSError:
+            # libedit/readline may reject some history files on macOS; ignore safely.
+            pass
+
+    atexit.register(_write_history_safe)
 
     # Tab-complete slash commands
     commands = [f"/{c}" for c in COMMANDS]
@@ -408,12 +432,13 @@ def setup_readline(history_file: Path):
 
 # ── Main REPL ──────────────────────────────────────────────────────────────
 
-def repl(config: dict, initial_prompt: str = None):
+def repl(config: dict[str, Any], initial_prompt: Optional[str] = None):
     from config import HISTORY_FILE
     from context import build_system_prompt
     from agent import AgentState, run, TextChunk, ThinkingChunk, ToolStart, ToolEnd, TurnDone, PermissionRequest
 
-    setup_readline(HISTORY_FILE)
+    if initial_prompt is None:
+        setup_readline(HISTORY_FILE)
     state = AgentState()
     verbose = config.get("verbose", False)
 
@@ -435,6 +460,7 @@ def repl(config: dict, initial_prompt: str = None):
     def run_query(user_input: str):
         nonlocal verbose
         verbose = config.get("verbose", False)
+        from session_memory import persist_session, maybe_schedule_dream
 
         # Rebuild system prompt each turn (picks up cwd changes, etc.)
         system_prompt = build_system_prompt()
@@ -473,6 +499,8 @@ def repl(config: dict, initial_prompt: str = None):
                         f"\n  [tokens: +{event.input_tokens} in / "
                         f"+{event.output_tokens} out]", "dim"
                     ))
+                persist_session(state, reason="turn_complete")
+                maybe_schedule_dream(state, config)
 
         flush_response()
         print(clr("╰──────────────────────────────────────────────", "dim"))
@@ -484,6 +512,8 @@ def repl(config: dict, initial_prompt: str = None):
             run_query(initial_prompt)
         except KeyboardInterrupt:
             print()
+        except Exception as e:
+            err(str(e))
         return
 
     while True:
@@ -564,10 +594,23 @@ def main():
             warn(f"No API key found for provider '{pname}'. "
                  f"Set {env} or run: /config {pname}_api_key=YOUR_KEY")
 
+        # If OpenRouter key exists, auto-fallback to a working default model.
+        if os.environ.get("OPENROUTER_API_KEY") and pname != "openrouter":
+            config["model"] = "openrouter/openai/gpt-4o-mini"
+            warn("Falling back to openrouter/openai/gpt-4o-mini (OPENROUTER_API_KEY detected).")
+
     initial = " ".join(args.prompt) if args.prompt else None
     if args.print_mode and not initial:
         err("--print requires a prompt argument")
         sys.exit(1)
+
+    # In non-interactive mode, fail cleanly if still no provider key.
+    if args.print_mode and not has_api_key(config):
+        pname = detect_provider(config["model"])
+        prov  = PROVIDERS.get(pname, {})
+        env   = prov.get("api_key_env", "<PROVIDER_API_KEY>")
+        err(f"No API key available for provider '{pname}'. Set {env} and retry.")
+        sys.exit(2)
 
     repl(config, initial_prompt=initial)
 

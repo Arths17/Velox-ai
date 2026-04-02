@@ -1,12 +1,14 @@
 """Core agent loop: neutral message format, multi-provider streaming."""
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportPrivateUsage=false
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Generator
+from datetime import datetime, timezone
+from typing import Any, Generator
 
 from tools import TOOL_SCHEMAS, execute_tool
-from providers import stream, AssistantTurn, TextChunk, ThinkingChunk, detect_provider
+from providers import stream, AssistantTurn, TextChunk, ThinkingChunk
 
 # ── Re-export event types (used by nano_claude.py) ────────────────────────
 __all__ = [
@@ -19,16 +21,20 @@ __all__ = [
 @dataclass
 class AgentState:
     """Mutable session state. messages use the neutral provider-independent format."""
-    messages: list = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
     total_input_tokens:  int = 0
     total_output_tokens: int = 0
     turn_count: int = 0
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_saved_at: str = ""
+    last_dream_turn: int = 0
 
 
 @dataclass
 class ToolStart:
     name:   str
-    inputs: dict
+    inputs: dict[str, Any]
 
 @dataclass
 class ToolEnd:
@@ -52,9 +58,9 @@ class PermissionRequest:
 def run(
     user_message: str,
     state: AgentState,
-    config: dict,
+    config: dict[str, Any],
     system_prompt: str,
-) -> Generator:
+) -> Generator[Any, None, None]:
     """
     Multi-turn agent loop (generator).
     Yields: TextChunk | ThinkingChunk | ToolStart | ToolEnd |
@@ -62,8 +68,21 @@ def run(
     """
     # Append user turn in neutral format
     state.messages.append({"role": "user", "content": user_message})
+    max_turns = int(config.get("max_agent_turns", 12))
+    turns_this_query = 0
 
     while True:
+        if turns_this_query >= max_turns:
+            state.messages.append({
+                "role": "assistant",
+                "content": (
+                    "Reached the configured turn budget for this request. "
+                    "Please continue with a follow-up message."
+                ),
+                "tool_calls": [],
+            })
+            break
+        turns_this_query += 1
         state.turn_count += 1
         assistant_turn: AssistantTurn | None = None
 
@@ -129,7 +148,7 @@ def run(
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _check_permission(tc: dict, config: dict) -> bool:
+def _check_permission(tc: dict[str, Any], config: dict[str, Any]) -> bool:
     """Return True if operation is auto-approved (no need to ask user)."""
     perm_mode = config.get("permission_mode", "auto")
     if perm_mode == "accept-all":
@@ -147,7 +166,7 @@ def _check_permission(tc: dict, config: dict) -> bool:
     return False   # Write, Edit → ask
 
 
-def _permission_desc(tc: dict) -> str:
+def _permission_desc(tc: dict[str, Any]) -> str:
     name = tc["name"]
     inp  = tc["input"]
     if name == "Bash":   return f"Run: {inp.get('command', '')}"

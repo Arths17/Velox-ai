@@ -8,6 +8,7 @@ Run:
 """
 import os
 import sys
+from typing import Any
 
 # Add parent path for imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -16,7 +17,7 @@ from config import load_config
 from context import build_system_prompt
 from agent import AgentState, run, TextChunk, ThinkingChunk, ToolStart, ToolEnd, TurnDone, PermissionRequest
 
-def demo():
+def demo() -> None:
     config = load_config()
     if not config["api_key"]:
         print("Error: Set ANTHROPIC_API_KEY environment variable")
@@ -64,7 +65,7 @@ def demo():
               "Search the web for 'Python 3.13 new features' and give me a brief summary")
 
 
-def _run_demo(state: AgentState, config: dict, system_prompt: str, prompt: str):
+def _run_demo(state: AgentState, config: dict[str, Any], system_prompt: str, prompt: str) -> None:
     print(f"\n[USER]: {prompt}\n")
     print("[CLAUDE]: ", end="", flush=True)
 
